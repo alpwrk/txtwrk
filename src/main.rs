@@ -30,6 +30,11 @@ fn main() -> io::Result<()> {
     } else if let Some(path) = args.iter().find(|a| !a.starts_with('-')) {
         match Buffer::from_file(&PathBuf::from(path)) {
             Ok(b) => b,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                let mut b = Buffer::new();
+                b.path = Some(PathBuf::from(path));
+                b
+            }
             Err(e) => {
                 eprintln!("txtwrk: cannot open {}: {}", path, e);
                 std::process::exit(1);
