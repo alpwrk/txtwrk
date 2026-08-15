@@ -5,6 +5,24 @@ simplicity similar to nano. It runs in your terminal.
 
 ## Install
 
+### Auto-install (build.sh)
+
+Compile and install `txtwrk` so you can just type `txtwrk` from anywhere:
+
+```sh
+./build.sh
+```
+
+This builds the release binary and installs it to `~/.local/bin/txtwrk`
+(which is on your PATH). You can override the install directory with the
+`TXTWRK_INSTALL_DIR` environment variable:
+
+```sh
+TXTWRK_INSTALL_DIR="$HOME/bin" ./build.sh
+```
+
+### Manual build
+
 ```sh
 cargo build --release
 # binary at target/release/txtwrk
