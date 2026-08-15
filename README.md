@@ -32,8 +32,9 @@ cargo build --release
 
 ```sh
 txtwrk                 # start with an empty buffer
-txtwrk file.txt        # open a file
+txtwrk file.txt        # open a file (creates it on first save if missing)
 txtwrk --tutorial      # open the built-in interactive tutorial (read-only)
+txtwrk -t              # shorthand for --tutorial
 ```
 
 ## Keybindings
@@ -127,6 +128,10 @@ move_left = "left"
 move_right = "right"
 move_up = "up"
 move_down = "down"
+select_left = "s-left"
+select_right = "s-right"
+select_up = "s-up"
+select_down = "s-down"
 word_forward = "c-right"
 word_backward = "c-left"
 line_start = "home"

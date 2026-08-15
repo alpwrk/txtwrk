@@ -2,8 +2,9 @@ txtwrk tutorial
 ===============
 
 txtwrk is a simple text editor with the power of vim and emacs but with
-simplicity similar to nano. This tutorial is read-only, so you can play
-around freely. Press [C-Q] to quit.
+simplicity similar to nano. This tutorial is read-only: you can move
+around, navigate, and select freely, but you cannot modify it. Press
+[C-Q] to quit.
 
 NORMAL mode
 -----------
@@ -35,16 +36,9 @@ Now move your cursor down to the next section about.
 Writing
 -------
 
-Writing is pretty simple, whatever you type in NORMAL mode appears in the
-text buffer at your cursor's location.
-
-If you want, you can practice by moving the cursor to the lines marked
-with ">", and then try writing each of these sentences as fast as you can.
-
-  The quick brown fox jumps over the lazy dog.
->
-  Sphinx of black quartz, judge my vow!
->
+In a normal buffer, whatever you type in NORMAL mode appears in the text
+buffer at your cursor's location. In this read-only tutorial, typing is
+disabled.
 
 As in most things, pressing [insert] will toggle between inserting and
 replacing characters.
@@ -62,14 +56,6 @@ Pressing [C-D], [backspace], or [delete] will delete the selected text.
 
 Writing over selected text replaces it.
 
-Try to select the (((texts))) marked with ">" in and delete it.
-
-> Delete (((this text))) right here.
-> And (((this))) too.
-> (((Delete))) the (((parentheses))) here, (((this))) too.
-> Now go back to the (((first one))), press [A-L] a couple of times until
-> (((this one))) is selected as well, and delete it all.
-
 Proceed to the next section about moving text.
 
 Moving text
@@ -77,11 +63,6 @@ Moving text
 
 You can move selected text around with [A-arrows].
 But remember, you need to select it first.
-
-> Try moving THIS line
-> under THIS one.
-> but above THIS one.
-> Now move THIS line above the previous ones
 
 Proceed to the next section about finding stuff.
 
@@ -105,8 +86,7 @@ Saving
 
 You can save the current file by pressing [C-S]. This will not work on the
 tutorial, as this it is read only.
-However, you can save it with a different name by pressing [CA-S].
-You can also make a new empty file with [C-N].
+You can make a new empty file with [C-N].
 
 You can also browse your file system by entering OPEN mode with [C-O]. OPEN
 mode is kind of similar to Emacs Dired, if you ever used it. With [enter]
@@ -120,9 +100,6 @@ SHELL mode
 You can enter SHELL mode by pressing [C-X] in NORMAL mode.
 In SHELL mode you can type shell commands, run them by pressing [enter],
 and their outputs will be inserted into the text buffer.
-
-Try it by running the "date" command at the ">".
->
 
 Proceed to the next section about the configuration of the editor.
 
