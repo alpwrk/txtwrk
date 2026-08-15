@@ -1,0 +1,136 @@
+txtwrk tutorial
+===============
+
+txtwrk is a simple text editor with the power of vim and emacs but with
+simplicity similar to nano. This tutorial is read-only, so you can play
+around freely. Press [C-Q] to quit.
+
+NORMAL mode
+-----------
+
+In NORMAL mode you can move your cursor with the arrow keys.
+
+This is because Vim's HJKL was chosen because back when Vi was being
+developed, keyboard designs were not as standardized, and many keyboards
+lacked dedicated arrow keys. Instead usually the arrows were printed H, J,
+K, and L, and so that was used for navigation. But txtwrk is a pragmatic
+text editor, you most likely have arrow keys on your keyboard (if you dont
+thats your problem, rebind it to hjkl i guess), they are there for simple
+and intuitive navigation, use them.
+
+You can move forward to the next word with [C-right], and backward to the
+previous word with [C-left], behavior is similar to Emacs.
+
+You can move to the beginning of the line with [home], and the end of the
+line with [end].
+You can press [page up] to go one screen up, and [page down] to go one
+screen down.
+
+[C-G] takes in an input number, and goes to that line on [enter].
+Alternatively after [C-G] you can just press [T], which goes to the top of
+the buffer, and [B] goes to the bottom of it.
+
+Now move your cursor down to the next section about.
+
+Writing
+-------
+
+Writing is pretty simple, whatever you type in NORMAL mode appears in the
+text buffer at your cursor's location.
+
+If you want, you can practice by moving the cursor to the lines marked
+with ">", and then try writing each of these sentences as fast as you can.
+
+  The quick brown fox jumps over the lazy dog.
+>
+  Sphinx of black quartz, judge my vow!
+>
+
+As in most things, pressing [insert] will toggle between inserting and
+replacing characters.
+
+Proceed to the next section about (natural) selection.
+
+Selection
+---------
+
+You can select characters (naturally) with [S-arrows].
+Selecting whole words can be done with [A-W], and selecting entire lines
+with [A-L].
+
+Pressing [C-D], [backspace], or [delete] will delete the selected text.
+
+Writing over selected text replaces it.
+
+Try to select the (((texts))) marked with ">" in and delete it.
+
+> Delete (((this text))) right here.
+> And (((this))) too.
+> (((Delete))) the (((parentheses))) here, (((this))) too.
+> Now go back to the (((first one))), press [A-L] a couple of times until
+> (((this one))) is selected as well, and delete it all.
+
+Proceed to the next section about moving text.
+
+Moving text
+-----------
+
+You can move selected text around with [A-arrows].
+But remember, you need to select it first.
+
+> Try moving THIS line
+> under THIS one.
+> but above THIS one.
+> Now move THIS line above the previous ones
+
+Proceed to the next section about finding stuff.
+
+Finding
+-------
+
+Assuming you are in NORMAL mode, by pressing [C-F] you will go into FIND
+mode.
+This will prompt you to input a pattern to match in the text buffer's
+contents.
+Pressing [enter] will move your cursor to the next instance of the text it
+matches.
+Pressing [C-F] will allow you to initiate a new search.
+Pressing [escape] will forcefully clear the FIND query and switch back to
+NORMAL mode.
+
+Proceed to the next section about SHELL mode by searching for "SHELL".
+
+Saving
+------
+
+You can save the current file by pressing [C-S]. This will not work on the
+tutorial, as this it is read only.
+However, you can save it with a different name by pressing [CA-S].
+You can also make a new empty file with [C-N].
+
+You can also browse your file system by entering OPEN mode with [C-O]. OPEN
+mode is kind of similar to Emacs Dired, if you ever used it. With [enter]
+you can enter directories and open text files. You can rename stuff with
+[C-R]. Pressing [del] prompts you regarding your desire to delete the
+selected file or directory.
+
+SHELL mode
+----------
+
+You can enter SHELL mode by pressing [C-X] in NORMAL mode.
+In SHELL mode you can type shell commands, run them by pressing [enter],
+and their outputs will be inserted into the text buffer.
+
+Try it by running the "date" command at the ">".
+>
+
+Proceed to the next section about the configuration of the editor.
+
+Configuration
+-------------
+
+txtwrk reads its configuration from ~/.config/txtwrk/config.toml.
+You can rebind keys, change the tab width, and tweak the color theme.
+See the README for the full list of options.
+
+That's it. Happy editing!
