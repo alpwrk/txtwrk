@@ -38,6 +38,8 @@ pub enum Action {
     Open,
     Shell,
     Quit,
+    Undo,
+    Redo,
 }
 
 #[derive(Debug, Clone)]
@@ -183,6 +185,8 @@ impl Config {
         bindings.insert(Action::Open, ctrl(KeyCode::Char('o')));
         bindings.insert(Action::Shell, ctrl(KeyCode::Char('x')));
         bindings.insert(Action::Quit, ctrl(KeyCode::Char('q')));
+        bindings.insert(Action::Undo, ctrl(KeyCode::Char('z')));
+        bindings.insert(Action::Redo, ctrl(KeyCode::Char('y')));
         Self {
             bindings,
             tab_width: 4,
@@ -285,6 +289,8 @@ fn action_from_name(name: &str) -> Option<Action> {
         "open" => Action::Open,
         "shell" => Action::Shell,
         "quit" => Action::Quit,
+        "undo" => Action::Undo,
+        "redo" => Action::Redo,
         _ => return None,
     })
 }

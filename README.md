@@ -51,6 +51,7 @@ txtwrk -t              # shorthand for --tutorial
 | typing | Insert text at cursor |
 | `Insert` | Toggle insert / replace mode |
 | `Tab` | Insert spaces (tab width configurable) |
+| `C-Z` / `C-Y` | Undo / redo |
 
 ### Selection
 
@@ -155,6 +156,8 @@ new_file = "c-n"
 open = "c-o"
 shell = "c-x"
 quit = "c-q"
+undo = "c-z"
+redo = "c-y"
 ```
 
 Key spec syntax: modifiers `c-` (ctrl), `a-` (alt), `s-` (shift), combined

@@ -34,6 +34,39 @@ impl Selection {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EditOp {
+    Insert {
+        pos: usize,
+        text: String,
+    },
+    Delete {
+        pos: usize,
+        text: String,
+        forward: bool,
+    },
+    Replace {
+        pos: usize,
+        old: String,
+        new: String,
+    },
+    ReplaceAll {
+        old: String,
+        new: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct HistoryEntry {
+    pub op: EditOp,
+    pub cursor_before: usize,
+    pub cursor_after: usize,
+    pub selection_before: Option<Selection>,
+    pub selection_after: Option<Selection>,
+    pub dirty_before: bool,
+    pub dirty_after: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct Buffer {
     pub gap: GapBuffer,
@@ -45,6 +78,8 @@ pub struct Buffer {
     pub dirty: bool,
     pub find_query: Option<String>,
     pub find_match: Option<(usize, usize)>,
+    pub undo_stack: Vec<HistoryEntry>,
+    pub redo_stack: Vec<HistoryEntry>,
 }
 
 impl Buffer {
@@ -59,6 +94,8 @@ impl Buffer {
             dirty: false,
             find_query: None,
             find_match: None,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
         }
     }
 
@@ -125,6 +162,8 @@ impl Buffer {
         if self.read_only {
             return;
         }
+        let cursor_before = self.cursor;
+        let selection_before = self.selection;
         if let Some(sel) = self.selection {
             self.gap.delete_range(sel.range());
             self.cursor = sel.start();
@@ -137,15 +176,35 @@ impl Buffer {
             }
             InsertMode::Replace => {
                 if self.cursor < self.len() {
+                    let old = self.text_range(self.cursor, self.cursor + 1);
                     self.gap
                         .replace_range(self.cursor..self.cursor + 1, &c.to_string());
                     self.cursor += 1;
+                    self.record(
+                        EditOp::Replace {
+                            pos: self.cursor - 1,
+                            old,
+                            new: c.to_string(),
+                        },
+                        cursor_before,
+                        selection_before,
+                    );
+                    self.dirty = true;
+                    return;
                 } else {
                     self.gap.insert(self.cursor, c);
                     self.cursor += 1;
                 }
             }
         }
+        self.record(
+            EditOp::Insert {
+                pos: self.cursor - 1,
+                text: c.to_string(),
+            },
+            cursor_before,
+            selection_before,
+        );
         self.dirty = true;
     }
 
@@ -153,6 +212,8 @@ impl Buffer {
         if self.read_only {
             return;
         }
+        let cursor_before = self.cursor;
+        let selection_before = self.selection;
         if let Some(sel) = self.selection {
             self.gap.delete_range(sel.range());
             self.cursor = sel.start();
@@ -160,6 +221,14 @@ impl Buffer {
         }
         self.gap.insert_str(self.cursor, s);
         self.cursor += s.chars().count();
+        self.record(
+            EditOp::Insert {
+                pos: self.cursor - s.chars().count(),
+                text: s.to_string(),
+            },
+            cursor_before,
+            selection_before,
+        );
         self.dirty = true;
     }
 
@@ -168,9 +237,21 @@ impl Buffer {
             return;
         }
         if let Some(sel) = self.selection {
+            let cursor_before = self.cursor;
+            let selection_before = self.selection;
+            let text = self.text_range(sel.start(), sel.end());
             self.gap.delete_range(sel.range());
             self.cursor = sel.start();
             self.selection = None;
+            self.record(
+                EditOp::Delete {
+                    pos: sel.start(),
+                    text,
+                    forward: true,
+                },
+                cursor_before,
+                selection_before,
+            );
             self.dirty = true;
         }
     }
@@ -183,8 +264,21 @@ impl Buffer {
             self.delete_selection();
             return;
         }
-        if self.gap.delete_before(self.cursor).is_some() {
+        if self.cursor > 0 {
+            let cursor_before = self.cursor;
+            let selection_before = self.selection;
+            let text = self.text_range(self.cursor - 1, self.cursor);
+            self.gap.delete_before(self.cursor);
             self.cursor -= 1;
+            self.record(
+                EditOp::Delete {
+                    pos: self.cursor,
+                    text,
+                    forward: false,
+                },
+                cursor_before,
+                selection_before,
+            );
             self.dirty = true;
         }
     }
@@ -197,7 +291,20 @@ impl Buffer {
             self.delete_selection();
             return;
         }
-        if self.gap.delete_after(self.cursor).is_some() {
+        if self.cursor < self.len() {
+            let cursor_before = self.cursor;
+            let selection_before = self.selection;
+            let text = self.text_range(self.cursor, self.cursor + 1);
+            self.gap.delete_after(self.cursor);
+            self.record(
+                EditOp::Delete {
+                    pos: self.cursor,
+                    text,
+                    forward: true,
+                },
+                cursor_before,
+                selection_before,
+            );
             self.dirty = true;
         }
     }
@@ -223,6 +330,7 @@ impl Buffer {
         let end = sel.end();
         let len = self.len();
         let is_ws = |c: char| c.is_whitespace();
+        let old = self.text();
 
         if dir > 0 {
             let mut i = end;
@@ -273,6 +381,14 @@ impl Buffer {
             self.cursor = sel_end;
             self.selection = Some(Selection::new(sel_start, sel_end));
         }
+        self.record(
+            EditOp::ReplaceAll {
+                old,
+                new: self.text(),
+            },
+            start,
+            Some(sel),
+        );
         self.dirty = true;
     }
 
@@ -286,6 +402,7 @@ impl Buffer {
         let start = sel.start();
         let end = sel.end();
         let len = self.len();
+        let old = self.text();
 
         if dir > 0 {
             let line = self.gap.line_of(end);
@@ -330,6 +447,14 @@ impl Buffer {
             self.cursor = sel_end;
             self.selection = Some(Selection::new(sel_start, sel_end));
         }
+        self.record(
+            EditOp::ReplaceAll {
+                old,
+                new: self.text(),
+            },
+            start,
+            Some(sel),
+        );
         self.dirty = true;
     }
 
@@ -485,6 +610,161 @@ impl Buffer {
         self.dirty = false;
         Ok(())
     }
+
+    fn record(&mut self, op: EditOp, cursor_before: usize, selection_before: Option<Selection>) {
+        let cursor_after = self.cursor;
+        let selection_after = self.selection;
+        let dirty_before = self.dirty;
+        let dirty_after = self.dirty;
+
+        let coalesce = match (self.undo_stack.last(), &op) {
+            (Some(prev), EditOp::Insert { pos, text })
+                if matches!(prev.op, EditOp::Insert { .. }) =>
+            {
+                if let EditOp::Insert {
+                    pos: prev_pos,
+                    text: prev_text,
+                } = &prev.op
+                {
+                    *pos == *prev_pos + prev_text.chars().count()
+                        && cursor_before == prev.cursor_after
+                        && selection_before == prev.selection_after
+                } else {
+                    false
+                }
+            }
+            (Some(prev), EditOp::Delete { pos, text, forward })
+                if matches!(prev.op, EditOp::Delete { .. }) =>
+            {
+                if let EditOp::Delete {
+                    pos: prev_pos,
+                    text: _prev_text,
+                    forward: prev_forward,
+                } = &prev.op
+                {
+                    let pos_ok = if *forward {
+                        *pos == *prev_pos
+                    } else {
+                        *pos + 1 == *prev_pos
+                    };
+                    pos_ok
+                        && *forward == *prev_forward
+                        && cursor_before == prev.cursor_after
+                        && selection_before == prev.selection_after
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        };
+
+        if coalesce {
+            if let Some(prev) = self.undo_stack.last_mut() {
+                match (&mut prev.op, &op) {
+                    (EditOp::Insert { text, .. }, EditOp::Insert { text: new_text, .. }) => {
+                        text.push_str(new_text);
+                    }
+                    (
+                        EditOp::Delete {
+                            text,
+                            forward: true,
+                            ..
+                        },
+                        EditOp::Delete {
+                            text: new_text,
+                            forward: true,
+                            ..
+                        },
+                    ) => {
+                        text.push_str(new_text);
+                    }
+                    (
+                        EditOp::Delete {
+                            text,
+                            forward: false,
+                            ..
+                        },
+                        EditOp::Delete {
+                            text: new_text,
+                            forward: false,
+                            ..
+                        },
+                    ) => {
+                        text.insert_str(0, new_text);
+                    }
+                    _ => {}
+                }
+                prev.cursor_after = cursor_after;
+                prev.selection_after = selection_after;
+                prev.dirty_after = dirty_after;
+            }
+        } else {
+            self.undo_stack.push(HistoryEntry {
+                op,
+                cursor_before,
+                cursor_after,
+                selection_before,
+                selection_after,
+                dirty_before,
+                dirty_after,
+            });
+        }
+        self.redo_stack.clear();
+    }
+
+    pub fn undo(&mut self) {
+        if self.read_only {
+            return;
+        }
+        let Some(entry) = self.undo_stack.pop() else {
+            return;
+        };
+        match &entry.op {
+            EditOp::Insert { pos, text } => {
+                self.gap.delete_range(*pos..pos + text.chars().count());
+            }
+            EditOp::Delete { pos, text, .. } => {
+                self.gap.insert_str(*pos, text);
+            }
+            EditOp::Replace { pos, old, .. } => {
+                self.gap.replace_range(*pos..pos + old.chars().count(), old);
+            }
+            EditOp::ReplaceAll { old, .. } => {
+                self.gap = GapBuffer::from_str(old);
+            }
+        }
+        self.cursor = entry.cursor_before;
+        self.selection = entry.selection_before;
+        self.dirty = entry.dirty_before;
+        self.redo_stack.push(entry);
+    }
+
+    pub fn redo(&mut self) {
+        if self.read_only {
+            return;
+        }
+        let Some(entry) = self.redo_stack.pop() else {
+            return;
+        };
+        match &entry.op {
+            EditOp::Insert { pos, text } => {
+                self.gap.insert_str(*pos, text);
+            }
+            EditOp::Delete { pos, text, .. } => {
+                self.gap.delete_range(*pos..pos + text.chars().count());
+            }
+            EditOp::Replace { pos, new, .. } => {
+                self.gap.replace_range(*pos..pos + new.chars().count(), new);
+            }
+            EditOp::ReplaceAll { new, .. } => {
+                self.gap = GapBuffer::from_str(new);
+            }
+        }
+        self.cursor = entry.cursor_after;
+        self.selection = entry.selection_after;
+        self.dirty = entry.dirty_after;
+        self.undo_stack.push(entry);
+    }
 }
 
 impl Default for Buffer {
@@ -616,5 +896,139 @@ mod tests {
         assert_eq!(b.cursor, 5);
         b.goto_top();
         assert_eq!(b.cursor, 0);
+    }
+
+    #[test]
+    fn undo_insert() {
+        let mut b = buf("hello");
+        b.move_cursor(5);
+        b.insert_char('!');
+        assert_eq!(b.text(), "hello!");
+        b.undo();
+        assert_eq!(b.text(), "hello");
+        assert_eq!(b.cursor, 5);
+        b.redo();
+        assert_eq!(b.text(), "hello!");
+        assert_eq!(b.cursor, 6);
+    }
+
+    #[test]
+    fn undo_backspace() {
+        let mut b = buf("hello");
+        b.move_cursor(5);
+        b.backspace();
+        assert_eq!(b.text(), "hell");
+        b.undo();
+        assert_eq!(b.text(), "hello");
+        assert_eq!(b.cursor, 5);
+        b.redo();
+        assert_eq!(b.text(), "hell");
+    }
+
+    #[test]
+    fn undo_delete_forward() {
+        let mut b = buf("hello");
+        b.move_cursor(0);
+        b.delete_forward();
+        assert_eq!(b.text(), "ello");
+        b.undo();
+        assert_eq!(b.text(), "hello");
+        b.redo();
+        assert_eq!(b.text(), "ello");
+    }
+
+    #[test]
+    fn undo_delete_selection() {
+        let mut b = buf("hello world");
+        b.selection = Some(Selection::new(5, 11));
+        b.move_cursor(11);
+        b.delete_selection();
+        assert_eq!(b.text(), "hello");
+        b.undo();
+        assert_eq!(b.text(), "hello world");
+        assert_eq!(b.cursor, 11);
+    }
+
+    #[test]
+    fn undo_replace_mode() {
+        let mut b = buf("hello");
+        b.insert_mode = InsertMode::Replace;
+        b.move_cursor(0);
+        b.insert_char('H');
+        assert_eq!(b.text(), "Hello");
+        b.undo();
+        assert_eq!(b.text(), "hello");
+        b.redo();
+        assert_eq!(b.text(), "Hello");
+    }
+
+    #[test]
+    fn undo_move_text() {
+        let mut b = buf("abc def ghi");
+        b.selection = Some(Selection::new(4, 7));
+        b.move_cursor(4);
+        b.move_selection_word(1);
+        assert_eq!(b.text(), "abc ghi def");
+        b.undo();
+        assert_eq!(b.text(), "abc def ghi");
+        b.redo();
+        assert_eq!(b.text(), "abc ghi def");
+    }
+
+    #[test]
+    fn typing_coalesces_into_one_undo() {
+        let mut b = buf("");
+        b.insert_str("abc");
+        assert_eq!(b.undo_stack.len(), 1);
+        b.undo();
+        assert_eq!(b.text(), "");
+        b.redo();
+        assert_eq!(b.text(), "abc");
+    }
+
+    #[test]
+    fn backspace_coalesces_into_one_undo() {
+        let mut b = buf("hello");
+        b.move_cursor(5);
+        b.backspace();
+        b.backspace();
+        assert_eq!(b.undo_stack.len(), 1);
+        b.undo();
+        assert_eq!(b.text(), "hello");
+    }
+
+    #[test]
+    fn new_edit_clears_redo() {
+        let mut b = buf("hello");
+        b.move_cursor(5);
+        b.insert_char('!');
+        b.undo();
+        assert_eq!(b.redo_stack.len(), 1);
+        b.insert_char('?');
+        assert_eq!(b.redo_stack.len(), 0);
+        b.undo();
+        assert_eq!(b.text(), "hello");
+    }
+
+    #[test]
+    fn undo_restores_cursor() {
+        let mut b = buf("hello world");
+        b.move_cursor(5);
+        b.insert_str(" there");
+        assert_eq!(b.cursor, 11);
+        b.undo();
+        assert_eq!(b.cursor, 5);
+        b.redo();
+        assert_eq!(b.cursor, 11);
+    }
+
+    #[test]
+    fn undo_blocked_on_read_only() {
+        let mut b = Buffer::from_tutorial("hello");
+        b.move_cursor(5);
+        b.insert_char('!');
+        assert_eq!(b.text(), "hello");
+        b.undo();
+        assert_eq!(b.text(), "hello");
     }
 }

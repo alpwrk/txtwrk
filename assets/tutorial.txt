@@ -43,6 +43,9 @@ disabled.
 As in most things, pressing [insert] will toggle between inserting and
 replacing characters.
 
+You can undo your last change with [C-Z], and redo it with [C-Y].
+Like typing, this does not work in this read-only tutorial.
+
 Proceed to the next section about (natural) selection.
 
 Selection

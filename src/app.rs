@@ -295,6 +295,8 @@ impl App {
             Action::Open => self.enter_open(),
             Action::Shell => self.enter_shell(),
             Action::Quit => self.enter_confirm(ConfirmKind::Quit, PathBuf::new()),
+            Action::Undo => self.buffer.undo(),
+            Action::Redo => self.buffer.redo(),
         }
     }
 
