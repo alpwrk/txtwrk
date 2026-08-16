@@ -20,6 +20,14 @@ pub enum Mode {
 pub enum ConfirmKind {
     DeleteFile,
     Quit,
+    DiscardChanges,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingAction {
+    Quit,
+    NewFile,
+    OpenFile { path: PathBuf },
 }
 
 #[derive(Debug, Clone)]
@@ -43,6 +51,7 @@ pub struct App {
     pub open_cursor: usize,
     pub confirm_kind: Option<ConfirmKind>,
     pub confirm_target: Option<PathBuf>,
+    pub pending_action: Option<PendingAction>,
     pub quit_requested: bool,
 }
 
@@ -67,6 +76,7 @@ impl App {
             open_cursor: 0,
             confirm_kind: None,
             confirm_target: None,
+            pending_action: None,
             quit_requested: false,
         };
         app.refresh_open_dir();
@@ -114,6 +124,7 @@ impl App {
         self.mode = Mode::Normal;
         self.confirm_kind = None;
         self.confirm_target = None;
+        self.pending_action = None;
     }
 
     pub fn refresh_open_dir(&mut self) {
@@ -146,14 +157,22 @@ impl App {
             self.open_cursor = 0;
             self.refresh_open_dir();
         } else {
-            match Buffer::from_file(&path) {
-                Ok(buf) => {
-                    self.buffer = buf;
-                    self.mode = Mode::Normal;
-                    self.set_message(format!("Opened {}", path.display()));
-                }
-                Err(e) => self.set_message(format!("Cannot open {}: {}", path.display(), e)),
+            if self.buffer.dirty {
+                self.confirm_discard(PendingAction::OpenFile { path });
+                return;
             }
+            self.do_open(&path);
+        }
+    }
+
+    fn do_open(&mut self, path: &std::path::Path) {
+        match Buffer::from_file(path) {
+            Ok(buf) => {
+                self.buffer = buf;
+                self.mode = Mode::Normal;
+                self.set_message(format!("Opened {}", path.display()));
+            }
+            Err(e) => self.set_message(format!("Cannot open {}: {}", path.display(), e)),
         }
     }
 
@@ -181,16 +200,36 @@ impl App {
         self.enter_confirm(ConfirmKind::DeleteFile, path);
     }
 
+    fn confirm_discard(&mut self, action: PendingAction) {
+        self.pending_action = Some(action);
+        self.mode = Mode::Confirm;
+        self.confirm_kind = Some(ConfirmKind::DiscardChanges);
+        self.confirm_target = None;
+    }
+
     pub fn run_shell_command(&mut self, cmd: &str) {
         let output = Command::new("sh").arg("-c").arg(cmd).output();
         match output {
             Ok(out) => {
+                const CAP: usize = 1 << 20;
                 let mut text = String::new();
+                let mut append = |bytes: &[u8]| {
+                    if text.len() < CAP {
+                        let s = String::from_utf8_lossy(bytes);
+                        let s = &s[..s
+                            .char_indices()
+                            .take(CAP - text.len())
+                            .last()
+                            .map(|(i, _)| i)
+                            .unwrap_or(0)];
+                        text.push_str(s);
+                    }
+                };
                 if !out.stdout.is_empty() {
-                    text.push_str(&String::from_utf8_lossy(&out.stdout));
+                    append(&out.stdout);
                 }
                 if !out.stderr.is_empty() {
-                    text.push_str(&String::from_utf8_lossy(&out.stderr));
+                    append(&out.stderr);
                 }
                 if text.is_empty() {
                     text.push_str(&format!(
@@ -198,8 +237,16 @@ impl App {
                         out.status.code().unwrap_or(-1)
                     ));
                 }
+                let truncated = out.stdout.len() + out.stderr.len() > CAP;
                 self.buffer.insert_str(&text);
-                self.set_message(format!("Command exited with {}", out.status));
+                if truncated {
+                    self.set_message(format!(
+                        "Command exited with {} (output truncated)",
+                        out.status
+                    ));
+                } else {
+                    self.set_message(format!("Command exited with {}", out.status));
+                }
             }
             Err(e) => self.set_message(format!("Failed to run command: {}", e)),
         }
@@ -294,7 +341,13 @@ impl App {
             Action::NewFile => self.new_file(),
             Action::Open => self.enter_open(),
             Action::Shell => self.enter_shell(),
-            Action::Quit => self.enter_confirm(ConfirmKind::Quit, PathBuf::new()),
+            Action::Quit => {
+                if self.buffer.dirty {
+                    self.confirm_discard(PendingAction::Quit);
+                } else {
+                    self.enter_confirm(ConfirmKind::Quit, PathBuf::new());
+                }
+            }
             Action::Undo => self.buffer.undo(),
             Action::Redo => self.buffer.redo(),
         }
@@ -380,7 +433,7 @@ impl App {
 
     fn save(&mut self) {
         if self.buffer.read_only {
-            self.set_message("Buffer is read-only; use [CA-S] to save as a new file");
+            self.set_message("Buffer is read-only; cannot save");
             return;
         }
         if self.buffer.path.is_none() {
@@ -409,6 +462,10 @@ impl App {
     }
 
     fn new_file(&mut self) {
+        if self.buffer.dirty {
+            self.confirm_discard(PendingAction::NewFile);
+            return;
+        }
         self.buffer = Buffer::new();
         self.mode = Mode::Normal;
         self.set_message("New file");
@@ -460,7 +517,6 @@ impl App {
                     self.buffer.find_query = Some(query);
                     self.set_message("No match found");
                 }
-                self.mode = Mode::Normal;
             }
             KeyCode::Esc => {
                 self.buffer.find_query = None;
@@ -542,7 +598,13 @@ impl App {
                 match self.confirm_kind {
                     Some(ConfirmKind::DeleteFile) => {
                         if let Some(path) = self.confirm_target.clone() {
-                            match std::fs::remove_file(&path) {
+                            let meta = std::fs::metadata(&path);
+                            let result = if meta.as_ref().map(|m| m.is_dir()).unwrap_or(false) {
+                                std::fs::remove_dir_all(&path)
+                            } else {
+                                std::fs::remove_file(&path)
+                            };
+                            match result {
                                 Ok(()) => self.set_message(format!("Deleted {}", path.display())),
                                 Err(e) => self.set_message(format!("Delete failed: {}", e)),
                             }
@@ -553,10 +615,25 @@ impl App {
                     Some(ConfirmKind::Quit) => {
                         self.quit_requested = true;
                     }
+                    Some(ConfirmKind::DiscardChanges) => match self.pending_action.take() {
+                        Some(PendingAction::Quit) => {
+                            self.quit_requested = true;
+                        }
+                        Some(PendingAction::NewFile) => {
+                            self.buffer = Buffer::new();
+                            self.mode = Mode::Normal;
+                            self.set_message("New file");
+                        }
+                        Some(PendingAction::OpenFile { path }) => {
+                            self.do_open(&path);
+                        }
+                        None => self.mode = Mode::Normal,
+                    },
                     None => self.mode = Mode::Normal,
                 }
                 self.confirm_kind = None;
                 self.confirm_target = None;
+                self.pending_action = None;
             }
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                 self.exit_confirm();

@@ -154,6 +154,10 @@ impl Buffer {
         self.cursor = pos.min(self.len());
     }
 
+    fn invalidate_find(&mut self) {
+        self.find_match = None;
+    }
+
     pub fn selection_range(&self) -> Option<(usize, usize)> {
         self.selection.map(|s| (s.start(), s.end()))
     }
@@ -162,17 +166,32 @@ impl Buffer {
         if self.read_only {
             return;
         }
+        self.invalidate_find();
         let cursor_before = self.cursor;
         let selection_before = self.selection;
-        if let Some(sel) = self.selection {
+        let replaced = self.selection.map(|sel| {
+            let text = self.text_range(sel.start(), sel.end());
             self.gap.delete_range(sel.range());
             self.cursor = sel.start();
             self.selection = None;
-        }
+            (sel.start(), text)
+        });
         match self.insert_mode {
             InsertMode::Insert => {
                 self.gap.insert(self.cursor, c);
                 self.cursor += 1;
+                let op = match replaced {
+                    Some((pos, old)) => EditOp::Replace {
+                        pos,
+                        old,
+                        new: c.to_string(),
+                    },
+                    None => EditOp::Insert {
+                        pos: self.cursor - 1,
+                        text: c.to_string(),
+                    },
+                };
+                self.record(op, cursor_before, selection_before);
             }
             InsertMode::Replace => {
                 if self.cursor < self.len() {
@@ -180,31 +199,37 @@ impl Buffer {
                     self.gap
                         .replace_range(self.cursor..self.cursor + 1, &c.to_string());
                     self.cursor += 1;
-                    self.record(
-                        EditOp::Replace {
+                    let op = match replaced {
+                        Some((pos, sel_text)) => EditOp::Replace {
+                            pos,
+                            old: format!("{}{}", sel_text, old),
+                            new: c.to_string(),
+                        },
+                        None => EditOp::Replace {
                             pos: self.cursor - 1,
                             old,
                             new: c.to_string(),
                         },
-                        cursor_before,
-                        selection_before,
-                    );
-                    self.dirty = true;
-                    return;
+                    };
+                    self.record(op, cursor_before, selection_before);
                 } else {
                     self.gap.insert(self.cursor, c);
                     self.cursor += 1;
+                    let op = match replaced {
+                        Some((pos, old)) => EditOp::Replace {
+                            pos,
+                            old,
+                            new: c.to_string(),
+                        },
+                        None => EditOp::Insert {
+                            pos: self.cursor - 1,
+                            text: c.to_string(),
+                        },
+                    };
+                    self.record(op, cursor_before, selection_before);
                 }
             }
         }
-        self.record(
-            EditOp::Insert {
-                pos: self.cursor - 1,
-                text: c.to_string(),
-            },
-            cursor_before,
-            selection_before,
-        );
         self.dirty = true;
     }
 
@@ -212,23 +237,33 @@ impl Buffer {
         if self.read_only {
             return;
         }
+        if s.is_empty() {
+            return;
+        }
+        self.invalidate_find();
         let cursor_before = self.cursor;
         let selection_before = self.selection;
-        if let Some(sel) = self.selection {
+        let replaced = self.selection.map(|sel| {
+            let text = self.text_range(sel.start(), sel.end());
             self.gap.delete_range(sel.range());
             self.cursor = sel.start();
             self.selection = None;
-        }
+            (sel.start(), text)
+        });
         self.gap.insert_str(self.cursor, s);
         self.cursor += s.chars().count();
-        self.record(
-            EditOp::Insert {
+        let op = match replaced {
+            Some((pos, old)) => EditOp::Replace {
+                pos,
+                old,
+                new: s.to_string(),
+            },
+            None => EditOp::Insert {
                 pos: self.cursor - s.chars().count(),
                 text: s.to_string(),
             },
-            cursor_before,
-            selection_before,
-        );
+        };
+        self.record(op, cursor_before, selection_before);
         self.dirty = true;
     }
 
@@ -236,6 +271,7 @@ impl Buffer {
         if self.read_only {
             return;
         }
+        self.invalidate_find();
         if let Some(sel) = self.selection {
             let cursor_before = self.cursor;
             let selection_before = self.selection;
@@ -260,6 +296,7 @@ impl Buffer {
         if self.read_only {
             return;
         }
+        self.invalidate_find();
         if let Some(_sel) = self.selection {
             self.delete_selection();
             return;
@@ -287,6 +324,7 @@ impl Buffer {
         if self.read_only {
             return;
         }
+        self.invalidate_find();
         if let Some(_sel) = self.selection {
             self.delete_selection();
             return;
@@ -323,6 +361,7 @@ impl Buffer {
         if self.read_only {
             return;
         }
+        self.invalidate_find();
         let Some(sel) = self.selection else {
             return;
         };
@@ -330,9 +369,8 @@ impl Buffer {
         let end = sel.end();
         let len = self.len();
         let is_ws = |c: char| c.is_whitespace();
-        let old = self.text();
-
-        if dir > 0 {
+        let cursor_before = self.cursor;
+        let (old, new, sel_start, sel_end) = if dir > 0 {
             let mut i = end;
             while i < len && self.gap.char_at(i).is_some_and(is_ws) {
                 i += 1;
@@ -345,17 +383,17 @@ impl Buffer {
             if word_start == word_end {
                 return;
             }
+            let old = self.text();
             let sel_text = self.text_range(start, end);
             let following = self.text_range(word_start, word_end);
             let ws = self.text_range(end, word_start);
             let prefix = self.text_range(0, start);
             let suffix = self.text_range(word_end, len);
             let new = format!("{}{}{}{}", prefix, following, ws, sel_text);
-            self.gap = GapBuffer::from_str(&format!("{}{}", new, suffix));
+            let new_full = format!("{}{}", new, suffix);
             let sel_start = start + following.chars().count() + ws.chars().count();
             let sel_end = sel_start + sel_text.chars().count();
-            self.cursor = sel_end;
-            self.selection = Some(Selection::new(sel_start, sel_end));
+            (old, new_full, sel_start, sel_end)
         } else {
             let mut i = start;
             while i > 0 && self.gap.char_at(i - 1).is_some_and(is_ws) {
@@ -369,26 +407,22 @@ impl Buffer {
             if word_start == word_end {
                 return;
             }
+            let old = self.text();
             let sel_text = self.text_range(start, end);
             let prev = self.text_range(word_start, word_end);
             let ws = self.text_range(word_end, start);
             let prefix = self.text_range(0, word_start);
             let suffix = self.text_range(end, len);
             let new = format!("{}{}{}{}", prefix, sel_text, ws, prev);
-            self.gap = GapBuffer::from_str(&format!("{}{}", new, suffix));
+            let new_full = format!("{}{}", new, suffix);
             let sel_start = word_start;
             let sel_end = sel_start + sel_text.chars().count();
-            self.cursor = sel_end;
-            self.selection = Some(Selection::new(sel_start, sel_end));
-        }
-        self.record(
-            EditOp::ReplaceAll {
-                old,
-                new: self.text(),
-            },
-            start,
-            Some(sel),
-        );
+            (old, new_full, sel_start, sel_end)
+        };
+        self.gap = GapBuffer::from_str(&new);
+        self.cursor = sel_end;
+        self.selection = Some(Selection::new(sel_start, sel_end));
+        self.record(EditOp::ReplaceAll { old, new }, cursor_before, Some(sel));
         self.dirty = true;
     }
 
@@ -396,15 +430,15 @@ impl Buffer {
         if self.read_only {
             return;
         }
+        self.invalidate_find();
         let Some(sel) = self.selection else {
             return;
         };
         let start = sel.start();
         let end = sel.end();
         let len = self.len();
-        let old = self.text();
-
-        if dir > 0 {
+        let cursor_before = self.cursor;
+        let (old, new, sel_start, sel_end) = if dir > 0 {
             let line = self.gap.line_of(end);
             let next_line = line + 1;
             if next_line >= self.gap.line_count() {
@@ -417,17 +451,17 @@ impl Buffer {
             } else {
                 next_end
             };
+            let old = self.text();
             let sel_text = self.text_range(start, end);
             let following = self.text_range(next_start, next_end);
             let ws = self.text_range(end, next_start);
             let prefix = self.text_range(0, start);
             let suffix = self.text_range(next_end_incl, len);
             let new = format!("{}{}{}{}", prefix, following, ws, sel_text);
-            self.gap = GapBuffer::from_str(&format!("{}{}", new, suffix));
+            let new_full = format!("{}{}", new, suffix);
             let sel_start = start + following.chars().count() + ws.chars().count();
             let sel_end = sel_start + sel_text.chars().count();
-            self.cursor = sel_end;
-            self.selection = Some(Selection::new(sel_start, sel_end));
+            (old, new_full, sel_start, sel_end)
         } else {
             let line = self.gap.line_of(start);
             if line == 0 {
@@ -435,26 +469,22 @@ impl Buffer {
             }
             let prev_start = self.gap.line_start(line - 1);
             let prev_end = self.gap.line_end(line - 1);
+            let old = self.text();
             let sel_text = self.text_range(start, end);
             let prev = self.text_range(prev_start, prev_end);
             let ws = self.text_range(prev_end, start);
             let prefix = self.text_range(0, prev_start);
             let suffix = self.text_range(end, len);
             let new = format!("{}{}{}{}", prefix, sel_text, ws, prev);
-            self.gap = GapBuffer::from_str(&format!("{}{}", new, suffix));
+            let new_full = format!("{}{}", new, suffix);
             let sel_start = prev_start;
             let sel_end = sel_start + sel_text.chars().count();
-            self.cursor = sel_end;
-            self.selection = Some(Selection::new(sel_start, sel_end));
-        }
-        self.record(
-            EditOp::ReplaceAll {
-                old,
-                new: self.text(),
-            },
-            start,
-            Some(sel),
-        );
+            (old, new_full, sel_start, sel_end)
+        };
+        self.gap = GapBuffer::from_str(&new);
+        self.cursor = sel_end;
+        self.selection = Some(Selection::new(sel_start, sel_end));
+        self.record(EditOp::ReplaceAll { old, new }, cursor_before, Some(sel));
         self.dirty = true;
     }
 
@@ -561,21 +591,27 @@ impl Buffer {
         {
             search_from = me;
         }
+        let mut byte_from = text
+            .char_indices()
+            .nth(search_from)
+            .map(|(b, _)| b)
+            .unwrap_or(text.len());
         let mut wrapped = false;
         loop {
-            if let Some(rel) = text[search_from..].find(query) {
-                let abs = search_from + rel;
+            if let Some(rel) = text[byte_from..].find(query) {
+                let abs_byte = byte_from + rel;
+                let abs = text[..abs_byte].chars().count();
                 if wrapped && abs >= self.cursor {
                     break;
                 }
                 self.cursor = abs;
-                self.find_match = Some((abs, abs + query.len()));
+                self.find_match = Some((abs, abs + query.chars().count()));
                 return true;
             }
             if wrapped {
                 break;
             }
-            search_from = 0;
+            byte_from = 0;
             wrapped = true;
         }
         self.find_match = None;
@@ -615,7 +651,7 @@ impl Buffer {
         let cursor_after = self.cursor;
         let selection_after = self.selection;
         let dirty_before = self.dirty;
-        let dirty_after = self.dirty;
+        let dirty_after = true;
 
         let coalesce = match (self.undo_stack.last(), &op) {
             (Some(prev), EditOp::Insert { pos, text })
@@ -645,7 +681,7 @@ impl Buffer {
                     let pos_ok = if *forward {
                         *pos == *prev_pos
                     } else {
-                        *pos + 1 == *prev_pos
+                        *pos + text.chars().count() == *prev_pos
                     };
                     pos_ok
                         && *forward == *prev_forward
@@ -680,17 +716,20 @@ impl Buffer {
                     }
                     (
                         EditOp::Delete {
+                            pos,
                             text,
                             forward: false,
                             ..
                         },
                         EditOp::Delete {
+                            pos: new_pos,
                             text: new_text,
                             forward: false,
                             ..
                         },
                     ) => {
                         text.insert_str(0, new_text);
+                        *pos = *new_pos;
                     }
                     _ => {}
                 }
@@ -716,6 +755,7 @@ impl Buffer {
         if self.read_only {
             return;
         }
+        self.invalidate_find();
         let Some(entry) = self.undo_stack.pop() else {
             return;
         };
@@ -726,8 +766,8 @@ impl Buffer {
             EditOp::Delete { pos, text, .. } => {
                 self.gap.insert_str(*pos, text);
             }
-            EditOp::Replace { pos, old, .. } => {
-                self.gap.replace_range(*pos..pos + old.chars().count(), old);
+            EditOp::Replace { pos, old, new } => {
+                self.gap.replace_range(*pos..pos + new.chars().count(), old);
             }
             EditOp::ReplaceAll { old, .. } => {
                 self.gap = GapBuffer::from_str(old);
@@ -743,6 +783,7 @@ impl Buffer {
         if self.read_only {
             return;
         }
+        self.invalidate_find();
         let Some(entry) = self.redo_stack.pop() else {
             return;
         };
@@ -753,8 +794,8 @@ impl Buffer {
             EditOp::Delete { pos, text, .. } => {
                 self.gap.delete_range(*pos..pos + text.chars().count());
             }
-            EditOp::Replace { pos, new, .. } => {
-                self.gap.replace_range(*pos..pos + new.chars().count(), new);
+            EditOp::Replace { pos, old, new } => {
+                self.gap.replace_range(*pos..pos + old.chars().count(), new);
             }
             EditOp::ReplaceAll { new, .. } => {
                 self.gap = GapBuffer::from_str(new);
@@ -884,6 +925,15 @@ mod tests {
         assert_eq!(b.cursor, 8);
         assert!(b.find_next("foo"));
         assert_eq!(b.cursor, 0);
+    }
+
+    #[test]
+    fn find_next_multibyte() {
+        let mut b = buf("héllo wörld foo");
+        b.move_cursor(0);
+        assert!(b.find_next("wörld"));
+        assert_eq!(b.cursor, 6);
+        assert_eq!(b.find_match, Some((6, 11)));
     }
 
     #[test]
@@ -1030,5 +1080,109 @@ mod tests {
         assert_eq!(b.text(), "hello");
         b.undo();
         assert_eq!(b.text(), "hello");
+    }
+
+    #[test]
+    fn undo_typing_over_selection_restores_selection() {
+        let mut b = buf("hello world");
+        b.selection = Some(Selection::new(6, 11));
+        b.move_cursor(11);
+        b.insert_str("there");
+        assert_eq!(b.text(), "hello there");
+        b.undo();
+        assert_eq!(b.text(), "hello world");
+        assert_eq!(b.cursor, 11);
+        b.redo();
+        assert_eq!(b.text(), "hello there");
+    }
+
+    #[test]
+    fn undo_backspace_mid_line() {
+        let mut b = buf("hello world");
+        b.move_cursor(6);
+        b.backspace();
+        b.backspace();
+        assert_eq!(b.text(), "hellworld");
+        b.undo();
+        assert_eq!(b.text(), "hello world");
+        assert_eq!(b.cursor, 6);
+    }
+
+    #[test]
+    fn undo_three_backspaces_coalesce() {
+        let mut b = buf("hello world");
+        b.move_cursor(6);
+        b.backspace();
+        b.backspace();
+        b.backspace();
+        assert_eq!(b.undo_stack.len(), 1);
+        b.undo();
+        assert_eq!(b.text(), "hello world");
+        assert_eq!(b.cursor, 6);
+    }
+
+    #[test]
+    fn delete_forward_coalesces() {
+        let mut b = buf("hello world");
+        b.move_cursor(0);
+        b.delete_forward();
+        b.delete_forward();
+        assert_eq!(b.undo_stack.len(), 1);
+        assert_eq!(b.text(), "llo world");
+        b.undo();
+        assert_eq!(b.text(), "hello world");
+        assert_eq!(b.cursor, 0);
+    }
+
+    #[test]
+    fn undo_move_selection_line() {
+        let mut b = buf("one\ntwo\nthree");
+        b.selection = Some(Selection::new(4, 7));
+        b.move_cursor(7);
+        b.move_selection_line(1);
+        assert_eq!(b.text(), "one\nthree\ntwo");
+        b.undo();
+        assert_eq!(b.text(), "one\ntwo\nthree");
+        assert_eq!(b.cursor, 7);
+        b.redo();
+        assert_eq!(b.text(), "one\nthree\ntwo");
+    }
+
+    #[test]
+    fn dirty_flag_after_redo() {
+        let mut b = buf("hello");
+        b.move_cursor(5);
+        b.insert_char('!');
+        b.dirty = false;
+        b.undo();
+        assert!(!b.dirty);
+        b.redo();
+        assert!(b.dirty);
+    }
+
+    #[test]
+    fn undo_replace_mode_over_selection() {
+        let mut b = buf("hello world");
+        b.insert_mode = InsertMode::Replace;
+        b.selection = Some(Selection::new(6, 11));
+        b.move_cursor(11);
+        b.insert_char('X');
+        assert_eq!(b.text(), "hello X");
+        b.undo();
+        assert_eq!(b.text(), "hello world");
+    }
+
+    #[test]
+    fn undo_replace_mode_over_selection_with_trailing_text() {
+        let mut b = buf("hello world foo");
+        b.insert_mode = InsertMode::Replace;
+        b.selection = Some(Selection::new(6, 11));
+        b.move_cursor(11);
+        b.insert_char('X');
+        assert_eq!(b.text(), "hello Xfoo");
+        b.undo();
+        assert_eq!(b.text(), "hello world foo");
+        b.redo();
+        assert_eq!(b.text(), "hello Xfoo");
     }
 }

@@ -172,13 +172,18 @@ fn render_status(app: &mut App, frame: &mut Frame, area: Rect, theme: &Theme) {
         .unwrap_or_else(|| "[no name]".into());
     let ro = if buffer.read_only { " [read-only]" } else { "" };
     let dirty = if buffer.dirty { " *" } else { "" };
+    let find = buffer
+        .find_query
+        .as_ref()
+        .map(|q| format!(" | find: {}", q))
+        .unwrap_or_default();
     let line = buffer.line_of() + 1;
     let col = buffer.cursor - buffer.current_line_start() + 1;
     let total = buffer.line_count();
 
     let left = format!(
-        " {} | {} | {} | {}{}{} ",
-        mode_name, insert_mode, filename, ro, dirty, ""
+        " {} | {} | {} | {}{}{}{} ",
+        mode_name, insert_mode, filename, ro, dirty, find, ""
     );
     let right = format!(" Ln {}, Col {} / {} ", line, col, total);
 
@@ -187,8 +192,8 @@ fn render_status(app: &mut App, frame: &mut Frame, area: Rect, theme: &Theme) {
         .bg(color(&theme.status_bg))
         .add_modifier(Modifier::BOLD);
 
-    let left_width = left.chars().count() as u16;
-    let right_width = right.chars().count() as u16;
+    let left_width = unicode_width::UnicodeWidthStr::width(left.as_str()) as u16;
+    let right_width = unicode_width::UnicodeWidthStr::width(right.as_str()) as u16;
     let pad = area.width.saturating_sub(left_width + right_width);
     let mut spans = vec![Span::styled(left, style)];
     if pad > 0 {
@@ -215,6 +220,7 @@ fn render_prompt(app: &mut App, frame: &mut Frame, area: Rect, theme: &Theme) {
                 format!("Delete {}? [y/N] ", target)
             }
             Some(ConfirmKind::Quit) => "Quit txtwrk? [y/N] ".into(),
+            Some(ConfirmKind::DiscardChanges) => "Discard unsaved changes? [y/N] ".into(),
             None => String::new(),
         },
         _ => {

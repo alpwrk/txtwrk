@@ -200,11 +200,23 @@ impl Config {
             return cfg;
         };
         let path: PathBuf = dir.join("txtwrk").join("config.toml");
-        let Ok(raw) = fs::read_to_string(&path) else {
-            return cfg;
+        let raw = match fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(e) => {
+                eprintln!("txtwrk: cannot read config {}: {}", path.display(), e);
+                return cfg;
+            }
         };
-        let Ok(parsed) = toml::from_str::<RawConfig>(&raw) else {
-            return cfg;
+        let parsed = match toml::from_str::<RawConfig>(&raw) {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                eprintln!(
+                    "txtwrk: ignoring malformed config {}: {}",
+                    path.display(),
+                    e
+                );
+                return cfg;
+            }
         };
         if let Some(tw) = parsed.tab_width {
             cfg.tab_width = tw;
@@ -238,10 +250,20 @@ impl Config {
         }
         if let Some(bindings) = parsed.bindings {
             for (action_name, key_spec) in bindings {
-                if let Some(action) = action_from_name(&action_name)
-                    && let Some(ev) = parse_key(&key_spec)
-                {
-                    cfg.bindings.insert(action, ev);
+                let Some(action) = action_from_name(&action_name) else {
+                    eprintln!("txtwrk: ignoring unknown binding \"{}\"", action_name);
+                    continue;
+                };
+                match parse_key(&key_spec) {
+                    Some(ev) => {
+                        cfg.bindings.insert(action, ev);
+                    }
+                    None => {
+                        eprintln!(
+                            "txtwrk: ignoring unparseable binding {} = \"{}\"",
+                            action_name, key_spec
+                        );
+                    }
                 }
             }
         }
@@ -297,14 +319,27 @@ fn action_from_name(name: &str) -> Option<Action> {
 
 fn parse_key(spec: &str) -> Option<KeyEvent> {
     let parts: Vec<&str> = spec.split('-').collect();
+    if parts.is_empty() {
+        return None;
+    }
+    let (mod_parts, key_part) = parts.split_at(parts.len() - 1);
+    let key = key_part[0];
     let mut mods = KeyModifiers::NONE;
-    let mut key = "";
-    for part in parts {
+    for part in mod_parts {
         match part.to_ascii_lowercase().as_str() {
             "c" | "ctrl" | "control" => mods |= KeyModifiers::CONTROL,
             "a" | "alt" => mods |= KeyModifiers::ALT,
             "s" | "shift" => mods |= KeyModifiers::SHIFT,
-            _ => key = part,
+            _ => {
+                for c in part.to_ascii_lowercase().chars() {
+                    match c {
+                        'c' => mods |= KeyModifiers::CONTROL,
+                        'a' => mods |= KeyModifiers::ALT,
+                        's' => mods |= KeyModifiers::SHIFT,
+                        _ => return None,
+                    }
+                }
+            }
         }
     }
     let code = match key.to_ascii_lowercase().as_str() {
@@ -345,4 +380,61 @@ fn parse_key(spec: &str) -> Option<KeyEvent> {
         }
     };
     Some(KeyEvent::new(code, mods))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_spec(spec: &str, code: KeyCode, mods: KeyModifiers) {
+        assert_eq!(
+            parse_key(spec),
+            Some(KeyEvent::new(code, mods)),
+            "spec: {}",
+            spec
+        );
+    }
+
+    #[test]
+    fn parse_key_simple() {
+        assert_spec("left", KeyCode::Left, KeyModifiers::NONE);
+        assert_spec("c-s", KeyCode::Char('s'), KeyModifiers::CONTROL);
+        assert_spec("a-s", KeyCode::Char('s'), KeyModifiers::ALT);
+        assert_spec("s-s", KeyCode::Char('s'), KeyModifiers::SHIFT);
+        assert_spec("s-left", KeyCode::Left, KeyModifiers::SHIFT);
+        assert_spec(
+            "ca-s",
+            KeyCode::Char('s'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        );
+        assert_spec(
+            "c-a-f1",
+            KeyCode::F(1),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        );
+        assert_spec(
+            "ctrl-alt-delete",
+            KeyCode::Delete,
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        );
+        assert_spec("space", KeyCode::Char(' '), KeyModifiers::NONE);
+        assert_spec("enter", KeyCode::Enter, KeyModifiers::NONE);
+    }
+
+    #[test]
+    fn parse_key_invalid() {
+        assert_eq!(parse_key(""), None);
+        assert_eq!(parse_key("-"), None);
+        assert_eq!(parse_key("c-"), None);
+        assert_eq!(parse_key("x-left"), None);
+        assert_eq!(parse_key("multi-char"), None);
+    }
+
+    #[test]
+    fn action_names() {
+        assert_eq!(action_from_name("save"), Some(Action::Save));
+        assert_eq!(action_from_name("save_as"), Some(Action::SaveAs));
+        assert_eq!(action_from_name("quit"), Some(Action::Quit));
+        assert_eq!(action_from_name("nonsense"), None);
+    }
 }

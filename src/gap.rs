@@ -106,11 +106,12 @@ impl GapBuffer {
     }
 
     pub fn delete_range(&mut self, range: Range<usize>) {
-        if range.start >= range.end {
+        let end = range.end.min(self.len());
+        if range.start >= end {
             return;
         }
         self.move_gap_to(range.start);
-        let mut remaining = range.end - range.start;
+        let mut remaining = end - range.start;
         while remaining > 0 {
             self.gap_end += 1;
             remaining -= 1;
@@ -253,7 +254,7 @@ mod tests {
 
     #[test]
     fn line_starts_and_text() {
-        let mut gb = GapBuffer::from_str("one\ntwo\nthree");
+        let gb = GapBuffer::from_str("one\ntwo\nthree");
         assert_eq!(gb.line_starts(), vec![0, 4, 8]);
         assert_eq!(gb.line_count(), 3);
         assert_eq!(gb.line_text(0), "one");
