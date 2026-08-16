@@ -21,6 +21,7 @@ pub enum ConfirmKind {
     DeleteFile,
     Quit,
     DiscardChanges,
+    SaveBeforeQuit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -272,6 +273,8 @@ impl App {
             KeyCode::Char(c) => {
                 if c == '\n' {
                     self.buffer.insert_char('\n');
+                } else if let Some(close) = self.auto_pair(c) {
+                    self.buffer.insert_pair(c, close);
                 } else {
                     self.buffer.insert_char(c);
                 }
@@ -343,13 +346,23 @@ impl App {
             Action::Shell => self.enter_shell(),
             Action::Quit => {
                 if self.buffer.dirty {
-                    self.confirm_discard(PendingAction::Quit);
+                    self.enter_confirm(ConfirmKind::SaveBeforeQuit, PathBuf::new());
                 } else {
                     self.enter_confirm(ConfirmKind::Quit, PathBuf::new());
                 }
             }
             Action::Undo => self.buffer.undo(),
             Action::Redo => self.buffer.redo(),
+        }
+    }
+
+    fn auto_pair(&self, c: char) -> Option<char> {
+        match c {
+            '(' => Some(')'),
+            '[' => Some(']'),
+            '{' => Some('}'),
+            '"' | '\'' if self.buffer.should_pair_quote() => Some(c),
+            _ => None,
         }
     }
 
@@ -562,9 +575,15 @@ impl App {
                 if self.prompt.starts_with("Save as:") {
                     let path = PathBuf::from(cmd.trim());
                     match self.buffer.save_as(&path) {
-                        Ok(()) => self.set_message(format!("Saved as {}", path.display())),
+                        Ok(()) => {
+                            self.set_message(format!("Saved as {}", path.display()));
+                            if self.pending_action == Some(PendingAction::Quit) {
+                                self.quit_requested = true;
+                            }
+                        }
                         Err(e) => self.set_message(format!("Save failed: {}", e)),
                     }
+                    self.pending_action = None;
                     self.mode = Mode::Normal;
                 } else if self.prompt.starts_with("Rename ") {
                     let Some(target) = self.confirm_target.clone().or_else(|| {
@@ -587,7 +606,10 @@ impl App {
                     self.mode = Mode::Normal;
                 }
             }
-            KeyCode::Esc => self.mode = Mode::Normal,
+            KeyCode::Esc => {
+                self.pending_action = None;
+                self.mode = Mode::Normal;
+            }
             _ => {}
         }
     }
@@ -629,11 +651,29 @@ impl App {
                         }
                         None => self.mode = Mode::Normal,
                     },
+                    Some(ConfirmKind::SaveBeforeQuit) => {
+                        if self.buffer.path.is_some() {
+                            match self.buffer.save() {
+                                Ok(()) => self.quit_requested = true,
+                                Err(e) => {
+                                    self.set_message(format!("Save failed: {}", e));
+                                    self.mode = Mode::Normal;
+                                }
+                            }
+                        } else {
+                            self.pending_action = Some(PendingAction::Quit);
+                            self.mode = Mode::Shell;
+                            self.prompt = "Save as: ".into();
+                            self.prompt_input.clear();
+                        }
+                    }
                     None => self.mode = Mode::Normal,
                 }
                 self.confirm_kind = None;
                 self.confirm_target = None;
-                self.pending_action = None;
+                if self.mode != Mode::Shell {
+                    self.pending_action = None;
+                }
             }
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                 self.exit_confirm();

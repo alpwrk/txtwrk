@@ -49,6 +49,7 @@ txtwrk -t              # shorthand for --tutorial
 | `PageUp` / `PageDown` | One screen up / down |
 | `C-G` | Goto line prompt (`T` = top, `B` = bottom, number + `Enter` = line) |
 | typing | Insert text at cursor |
+| `(` `[` `{` `"` `'` | Auto-close brackets and quotes (quotes only after a word boundary) |
 | `Insert` | Toggle insert / replace mode |
 | `Tab` | Insert spaces (tab width configurable) |
 | `C-Z` / `C-Y` | Undo / redo |
@@ -105,7 +106,7 @@ txtwrk -t              # shorthand for --tutorial
 
 | Key | Action |
 | --- | --- |
-| `C-Q` | Quit (asks for confirmation) |
+| `C-Q` | Quit (asks to save if there are unsaved changes) |
 
 ## Configuration
 

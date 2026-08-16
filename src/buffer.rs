@@ -233,6 +233,49 @@ impl Buffer {
         self.dirty = true;
     }
 
+    pub fn insert_pair(&mut self, open: char, close: char) {
+        if self.read_only {
+            return;
+        }
+        if let Some(sel) = self.selection {
+            let start = sel.start();
+            let end = sel.end();
+            let old = self.text_range(start, end);
+            let new = format!("{}{}{}", open, old, close);
+            self.gap.delete_range(sel.range());
+            self.cursor = start;
+            self.selection = None;
+            self.gap.insert_str(start, &new);
+            self.cursor = start + old.chars().count() + 1;
+            self.record(
+                EditOp::Replace {
+                    pos: start,
+                    old,
+                    new,
+                },
+                end,
+                Some(sel),
+            );
+            self.dirty = true;
+            return;
+        }
+        let mut s = String::with_capacity(2);
+        s.push(open);
+        s.push(close);
+        self.insert_str(&s);
+        self.cursor -= 1;
+    }
+
+    pub fn should_pair_quote(&self) -> bool {
+        if self.cursor == 0 {
+            return true;
+        }
+        match self.gap.char_at(self.cursor - 1) {
+            Some(c) => c.is_whitespace() || matches!(c, '(' | '[' | '{'),
+            None => true,
+        }
+    }
+
     pub fn insert_str(&mut self, s: &str) {
         if self.read_only {
             return;
@@ -860,6 +903,47 @@ mod tests {
         b.delete_selection();
         assert_eq!(b.text(), "hello");
         assert_eq!(b.cursor, 5);
+    }
+
+    #[test]
+    fn insert_pair_places_cursor_between() {
+        let mut b = buf("");
+        b.insert_pair('(', ')');
+        assert_eq!(b.text(), "()");
+        assert_eq!(b.cursor, 1);
+        b.insert_pair('[', ']');
+        assert_eq!(b.text(), "([])");
+        assert_eq!(b.cursor, 2);
+    }
+
+    #[test]
+    fn insert_pair_over_selection() {
+        let mut b = buf("hello world");
+        b.selection = Some(Selection::new(6, 11));
+        b.move_cursor(11);
+        b.insert_pair('(', ')');
+        assert_eq!(b.text(), "hello (world)");
+        assert_eq!(b.cursor, 12);
+        b.undo();
+        assert_eq!(b.text(), "hello world");
+        assert_eq!(b.cursor, 11);
+        b.redo();
+        assert_eq!(b.text(), "hello (world)");
+    }
+
+    #[test]
+    fn should_pair_quote_heuristic() {
+        let mut b = buf("don't");
+        b.move_cursor(3);
+        assert!(!b.should_pair_quote());
+        b.move_cursor(0);
+        assert!(b.should_pair_quote());
+        let mut b2 = buf("foo bar");
+        b2.move_cursor(4);
+        assert!(b2.should_pair_quote());
+        let mut b3 = buf("(foo");
+        b3.move_cursor(1);
+        assert!(b3.should_pair_quote());
     }
 
     #[test]

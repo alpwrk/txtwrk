@@ -221,6 +221,7 @@ fn render_prompt(app: &mut App, frame: &mut Frame, area: Rect, theme: &Theme) {
             }
             Some(ConfirmKind::Quit) => "Quit txtwrk? [y/N] ".into(),
             Some(ConfirmKind::DiscardChanges) => "Discard unsaved changes? [y/N] ".into(),
+            Some(ConfirmKind::SaveBeforeQuit) => "Save changes before quitting? [y/N] ".into(),
             None => String::new(),
         },
         _ => {
