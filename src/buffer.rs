@@ -262,18 +262,39 @@ impl Buffer {
         let mut s = String::with_capacity(2);
         s.push(open);
         s.push(close);
+        if self.insert_mode == InsertMode::Replace && self.cursor < self.len() {
+            let cursor_before = self.cursor;
+            let selection_before = self.selection;
+            let old = self.text_range(self.cursor, self.cursor + 1);
+            self.gap.replace_range(self.cursor..self.cursor + 1, &s);
+            self.cursor += 1;
+            self.record(
+                EditOp::Replace {
+                    pos: self.cursor - 1,
+                    old,
+                    new: s,
+                },
+                cursor_before,
+                selection_before,
+            );
+            self.dirty = true;
+            return;
+        }
         self.insert_str(&s);
         self.cursor -= 1;
+        if let Some(prev) = self.undo_stack.last_mut() {
+            prev.cursor_after = self.cursor;
+            prev.selection_after = self.selection;
+        }
     }
 
     pub fn should_pair_quote(&self) -> bool {
         if self.cursor == 0 {
             return true;
         }
-        match self.gap.char_at(self.cursor - 1) {
-            Some(c) => c.is_whitespace() || matches!(c, '(' | '[' | '{'),
-            None => true,
-        }
+        self.gap
+            .char_at(self.cursor - 1)
+            .is_some_and(|c| c.is_whitespace() || matches!(c, '(' | '[' | '{'))
     }
 
     pub fn insert_str(&mut self, s: &str) {
@@ -398,6 +419,10 @@ impl Buffer {
             }
         }
         s
+    }
+
+    pub fn char_at(&self, pos: usize) -> Option<char> {
+        self.gap.char_at(pos)
     }
 
     pub fn move_selection_word(&mut self, dir: isize) {
@@ -628,11 +653,13 @@ impl Buffer {
             return false;
         }
         let text = self.text();
+        let query_chars = query.chars().count();
         let mut search_from = self.cursor;
         if let Some((ms, me)) = self.find_match
             && ms == self.cursor
+            && me > ms
         {
-            search_from = me;
+            search_from = ms + 1;
         }
         let mut byte_from = text
             .char_indices()
@@ -648,7 +675,7 @@ impl Buffer {
                     break;
                 }
                 self.cursor = abs;
-                self.find_match = Some((abs, abs + query.chars().count()));
+                self.find_match = Some((abs, abs + query_chars));
                 return true;
             }
             if wrapped {
@@ -659,6 +686,41 @@ impl Buffer {
         }
         self.find_match = None;
         false
+    }
+
+    fn write_atomic(&self, path: &Path) -> io::Result<()> {
+        let target = if let Ok(meta) = fs::symlink_metadata(path) {
+            if meta.file_type().is_symlink() {
+                match fs::canonicalize(path) {
+                    Ok(real) => real,
+                    Err(_) => return fs::write(path, self.text()),
+                }
+            } else {
+                path.to_path_buf()
+            }
+        } else {
+            path.to_path_buf()
+        };
+        let dir = target.parent().filter(|d| !d.as_os_str().is_empty());
+        let file_name = target
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "buffer".into());
+        let tmp = match dir {
+            Some(d) => d.join(format!(".{}.txtwrk.tmp", file_name)),
+            None => PathBuf::from(format!(".{}.txtwrk.tmp", file_name)),
+        };
+        let result = (|| {
+            fs::write(&tmp, self.text())?;
+            if let Ok(meta) = fs::metadata(&target) {
+                fs::set_permissions(&tmp, meta.permissions())?;
+            }
+            fs::rename(&tmp, &target)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+        result
     }
 
     pub fn save(&mut self) -> io::Result<()> {
@@ -672,7 +734,7 @@ impl Buffer {
             .path
             .clone()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no filename set"))?;
-        fs::write(&path, self.text())?;
+        self.write_atomic(&path)?;
         self.dirty = false;
         Ok(())
     }
@@ -684,7 +746,7 @@ impl Buffer {
                 "buffer is read-only",
             ));
         }
-        fs::write(path, self.text())?;
+        self.write_atomic(path)?;
         self.path = Some(path.to_path_buf());
         self.dirty = false;
         Ok(())
@@ -860,6 +922,7 @@ impl Default for Buffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     fn buf(s: &str) -> Buffer {
         let mut b = Buffer::new();
@@ -914,6 +977,22 @@ mod tests {
         b.insert_pair('[', ']');
         assert_eq!(b.text(), "([])");
         assert_eq!(b.cursor, 2);
+    }
+
+    #[test]
+    fn insert_pair_replace_mode() {
+        let mut b = buf("ab");
+        b.insert_mode = InsertMode::Replace;
+        b.move_cursor(0);
+        b.insert_pair('(', ')');
+        assert_eq!(b.text(), "()b");
+        assert_eq!(b.cursor, 1);
+        b.undo();
+        assert_eq!(b.text(), "ab");
+        assert_eq!(b.cursor, 0);
+        b.redo();
+        assert_eq!(b.text(), "()b");
+        assert_eq!(b.cursor, 1);
     }
 
     #[test]
@@ -1008,6 +1087,18 @@ mod tests {
         assert!(b.find_next("foo"));
         assert_eq!(b.cursor, 8);
         assert!(b.find_next("foo"));
+        assert_eq!(b.cursor, 0);
+    }
+
+    #[test]
+    fn find_next_overlapping() {
+        let mut b = buf("aaa");
+        b.move_cursor(0);
+        assert!(b.find_next("aa"));
+        assert_eq!(b.cursor, 0);
+        assert!(b.find_next("aa"));
+        assert_eq!(b.cursor, 1);
+        assert!(b.find_next("aa"));
         assert_eq!(b.cursor, 0);
     }
 
@@ -1268,5 +1359,33 @@ mod tests {
         assert_eq!(b.text(), "hello world foo");
         b.redo();
         assert_eq!(b.text(), "hello Xfoo");
+    }
+
+    #[test]
+    fn save_preserves_permissions_and_symlinks() {
+        let dir = std::env::temp_dir().join(format!("txtwrk-save-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let real = dir.join("real.txt");
+        fs::write(&real, "old").unwrap();
+        fs::set_permissions(&real, fs::Permissions::from_mode(0o600)).unwrap();
+        let link = dir.join("link.txt");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let mut b = Buffer::from_file(&link).unwrap();
+        b.move_cursor(b.len());
+        b.insert_str("new");
+        b.save().unwrap();
+
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read_to_string(&real).unwrap(), "oldnew");
+        let mode = fs::metadata(&real).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

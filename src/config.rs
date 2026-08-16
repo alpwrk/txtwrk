@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
+use std::io;
 use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -44,7 +45,7 @@ pub enum Action {
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    pub bindings: HashMap<Action, KeyEvent>,
+    pub bindings: HashMap<Action, Vec<KeyEvent>>,
     pub tab_width: u16,
     pub theme: Theme,
 }
@@ -113,80 +114,83 @@ fn ctrl_alt(code: KeyCode) -> KeyEvent {
 
 impl Config {
     pub fn defaults() -> Self {
-        let mut bindings = HashMap::new();
-        bindings.insert(
+        let mut bindings: HashMap<Action, Vec<KeyEvent>> = HashMap::new();
+        let mut bind = |action: Action, ev: KeyEvent| {
+            bindings.entry(action).or_default().push(ev);
+        };
+        bind(
             Action::MoveLeft,
             key_event(KeyCode::Left, KeyModifiers::NONE),
         );
-        bindings.insert(
+        bind(
             Action::MoveRight,
             key_event(KeyCode::Right, KeyModifiers::NONE),
         );
-        bindings.insert(Action::MoveUp, key_event(KeyCode::Up, KeyModifiers::NONE));
-        bindings.insert(
+        bind(Action::MoveUp, key_event(KeyCode::Up, KeyModifiers::NONE));
+        bind(
             Action::MoveDown,
             key_event(KeyCode::Down, KeyModifiers::NONE),
         );
-        bindings.insert(
+        bind(
             Action::SelectLeft,
             key_event(KeyCode::Left, KeyModifiers::SHIFT),
         );
-        bindings.insert(
+        bind(
             Action::SelectRight,
             key_event(KeyCode::Right, KeyModifiers::SHIFT),
         );
-        bindings.insert(
+        bind(
             Action::SelectUp,
             key_event(KeyCode::Up, KeyModifiers::SHIFT),
         );
-        bindings.insert(
+        bind(
             Action::SelectDown,
             key_event(KeyCode::Down, KeyModifiers::SHIFT),
         );
-        bindings.insert(Action::WordForward, ctrl(KeyCode::Right));
-        bindings.insert(Action::WordBackward, ctrl(KeyCode::Left));
-        bindings.insert(
+        bind(Action::WordForward, ctrl(KeyCode::Right));
+        bind(Action::WordBackward, ctrl(KeyCode::Left));
+        bind(
             Action::LineStart,
             key_event(KeyCode::Home, KeyModifiers::NONE),
         );
-        bindings.insert(Action::LineEnd, key_event(KeyCode::End, KeyModifiers::NONE));
-        bindings.insert(
+        bind(Action::LineEnd, key_event(KeyCode::End, KeyModifiers::NONE));
+        bind(
             Action::PageUp,
             key_event(KeyCode::PageUp, KeyModifiers::NONE),
         );
-        bindings.insert(
+        bind(
             Action::PageDown,
             key_event(KeyCode::PageDown, KeyModifiers::NONE),
         );
-        bindings.insert(Action::Goto, ctrl(KeyCode::Char('g')));
-        bindings.insert(
+        bind(Action::Goto, ctrl(KeyCode::Char('g')));
+        bind(
             Action::Backspace,
             key_event(KeyCode::Backspace, KeyModifiers::NONE),
         );
-        bindings.insert(
+        bind(
             Action::Delete,
             key_event(KeyCode::Delete, KeyModifiers::NONE),
         );
-        bindings.insert(Action::Delete, ctrl(KeyCode::Char('d')));
-        bindings.insert(
+        bind(Action::Delete, ctrl(KeyCode::Char('d')));
+        bind(
             Action::InsertToggle,
             key_event(KeyCode::Insert, KeyModifiers::NONE),
         );
-        bindings.insert(Action::SelectWord, alt(KeyCode::Char('w')));
-        bindings.insert(Action::SelectLine, alt(KeyCode::Char('l')));
-        bindings.insert(Action::MoveTextLeft, alt(KeyCode::Left));
-        bindings.insert(Action::MoveTextRight, alt(KeyCode::Right));
-        bindings.insert(Action::MoveTextUp, alt(KeyCode::Up));
-        bindings.insert(Action::MoveTextDown, alt(KeyCode::Down));
-        bindings.insert(Action::Find, ctrl(KeyCode::Char('f')));
-        bindings.insert(Action::Save, ctrl(KeyCode::Char('s')));
-        bindings.insert(Action::SaveAs, ctrl_alt(KeyCode::Char('s')));
-        bindings.insert(Action::NewFile, ctrl(KeyCode::Char('n')));
-        bindings.insert(Action::Open, ctrl(KeyCode::Char('o')));
-        bindings.insert(Action::Shell, ctrl(KeyCode::Char('x')));
-        bindings.insert(Action::Quit, ctrl(KeyCode::Char('q')));
-        bindings.insert(Action::Undo, ctrl(KeyCode::Char('z')));
-        bindings.insert(Action::Redo, ctrl(KeyCode::Char('y')));
+        bind(Action::SelectWord, alt(KeyCode::Char('w')));
+        bind(Action::SelectLine, alt(KeyCode::Char('l')));
+        bind(Action::MoveTextLeft, alt(KeyCode::Left));
+        bind(Action::MoveTextRight, alt(KeyCode::Right));
+        bind(Action::MoveTextUp, alt(KeyCode::Up));
+        bind(Action::MoveTextDown, alt(KeyCode::Down));
+        bind(Action::Find, ctrl(KeyCode::Char('f')));
+        bind(Action::Save, ctrl(KeyCode::Char('s')));
+        bind(Action::SaveAs, ctrl_alt(KeyCode::Char('s')));
+        bind(Action::NewFile, ctrl(KeyCode::Char('n')));
+        bind(Action::Open, ctrl(KeyCode::Char('o')));
+        bind(Action::Shell, ctrl(KeyCode::Char('x')));
+        bind(Action::Quit, ctrl(KeyCode::Char('q')));
+        bind(Action::Undo, ctrl(KeyCode::Char('z')));
+        bind(Action::Redo, ctrl(KeyCode::Char('y')));
         Self {
             bindings,
             tab_width: 4,
@@ -202,6 +206,7 @@ impl Config {
         let path: PathBuf = dir.join("txtwrk").join("config.toml");
         let raw = match fs::read_to_string(&path) {
             Ok(raw) => raw,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return cfg,
             Err(e) => {
                 eprintln!("txtwrk: cannot read config {}: {}", path.display(), e);
                 return cfg;
@@ -256,7 +261,7 @@ impl Config {
                 };
                 match parse_key(&key_spec) {
                     Some(ev) => {
-                        cfg.bindings.insert(action, ev);
+                        cfg.bindings.entry(action).or_default().push(ev);
                     }
                     None => {
                         eprintln!(
@@ -273,7 +278,7 @@ impl Config {
     pub fn action_for(&self, ev: &KeyEvent) -> Option<Action> {
         self.bindings
             .iter()
-            .find(|(_, bound)| **bound == *ev)
+            .find(|(_, keys)| keys.iter().any(|k| k == ev))
             .map(|(action, _)| *action)
     }
 }
@@ -323,9 +328,12 @@ fn parse_key(spec: &str) -> Option<KeyEvent> {
         return None;
     }
     let (mod_parts, key_part) = parts.split_at(parts.len() - 1);
-    let key = key_part[0];
+    let key = key_part[0].to_ascii_lowercase();
     let mut mods = KeyModifiers::NONE;
     for part in mod_parts {
+        if part.is_empty() {
+            return None;
+        }
         match part.to_ascii_lowercase().as_str() {
             "c" | "ctrl" | "control" => mods |= KeyModifiers::CONTROL,
             "a" | "alt" => mods |= KeyModifiers::ALT,
@@ -342,7 +350,7 @@ fn parse_key(spec: &str) -> Option<KeyEvent> {
             }
         }
     }
-    let code = match key.to_ascii_lowercase().as_str() {
+    let code = match key.as_str() {
         "enter" => KeyCode::Enter,
         "esc" | "escape" => KeyCode::Esc,
         "tab" => KeyCode::Tab,
@@ -426,6 +434,7 @@ mod tests {
         assert_eq!(parse_key(""), None);
         assert_eq!(parse_key("-"), None);
         assert_eq!(parse_key("c-"), None);
+        assert_eq!(parse_key("-s"), None);
         assert_eq!(parse_key("x-left"), None);
         assert_eq!(parse_key("multi-char"), None);
     }
@@ -436,5 +445,18 @@ mod tests {
         assert_eq!(action_from_name("save_as"), Some(Action::SaveAs));
         assert_eq!(action_from_name("quit"), Some(Action::Quit));
         assert_eq!(action_from_name("nonsense"), None);
+    }
+
+    #[test]
+    fn defaults_bind_delete_twice() {
+        let cfg = Config::defaults();
+        let delete = cfg
+            .action_for(&key_event(KeyCode::Delete, KeyModifiers::NONE))
+            .unwrap();
+        let ctrl_d = cfg
+            .action_for(&key_event(KeyCode::Char('d'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert_eq!(delete, Action::Delete);
+        assert_eq!(ctrl_d, Action::Delete);
     }
 }

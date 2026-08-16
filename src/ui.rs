@@ -219,9 +219,18 @@ fn render_prompt(app: &mut App, frame: &mut Frame, area: Rect, theme: &Theme) {
                     .unwrap_or_default();
                 format!("Delete {}? [y/N] ", target)
             }
+            Some(ConfirmKind::DeleteDir) => {
+                let target = app
+                    .confirm_target
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default();
+                format!("Recursively delete directory {}? [y/N] ", target)
+            }
             Some(ConfirmKind::Quit) => "Quit txtwrk? [y/N] ".into(),
             Some(ConfirmKind::DiscardChanges) => "Discard unsaved changes? [y/N] ".into(),
             Some(ConfirmKind::SaveBeforeQuit) => "Save changes before quitting? [y/N] ".into(),
+            Some(ConfirmKind::DiscardAndQuit) => "Discard changes and quit? [y/N] ".into(),
             None => String::new(),
         },
         _ => {

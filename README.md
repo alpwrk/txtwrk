@@ -49,7 +49,7 @@ txtwrk -t              # shorthand for --tutorial
 | `PageUp` / `PageDown` | One screen up / down |
 | `C-G` | Goto line prompt (`T` = top, `B` = bottom, number + `Enter` = line) |
 | typing | Insert text at cursor |
-| `(` `[` `{` `"` `'` | Auto-close brackets and quotes (quotes only after a word boundary) |
+| `(` `[` `{` `"` `'` | Auto-close brackets and quotes (quotes pair after whitespace, `(` `[` `{`, or start of buffer; brackets and quotes wrap a selection) |
 | `Insert` | Toggle insert / replace mode |
 | `Tab` | Insert spaces (tab width configurable) |
 | `C-Z` / `C-Y` | Undo / redo |
@@ -71,7 +71,7 @@ txtwrk -t              # shorthand for --tutorial
 | Key | Action |
 | --- | --- |
 | `C-F` | Enter FIND mode, type a pattern |
-| `Enter` | Jump to next match (wraps around) |
+| `Enter` | Jump to next match (wraps around; stays in FIND mode so Enter repeats the search) |
 | `C-F` | Start a new search |
 | `Esc` | Clear the query and return to NORMAL |
 
@@ -91,7 +91,7 @@ txtwrk -t              # shorthand for --tutorial
 | `Enter` | Enter directory / open file |
 | `Backspace` | Go to parent directory |
 | `C-R` | Rename selected file/dir |
-| `Delete` | Delete selected file/dir (asks for confirmation) |
+| `Delete` | Delete selected file/dir (asks for confirmation; directories ask separately before recursive delete) |
 | `Esc` | Back to NORMAL |
 
 ### SHELL mode
@@ -102,11 +102,14 @@ txtwrk -t              # shorthand for --tutorial
 | `Enter` | Run command via `sh -c`, insert stdout+stderr at cursor |
 | `Esc` | Cancel |
 
+SHELL commands run with a 5-second timeout and their output is capped at
+1 MiB; the excess is dropped and the buffer notes that it was truncated.
+
 ### Quitting
 
 | Key | Action |
 | --- | --- |
-| `C-Q` | Quit (asks to save if there are unsaved changes) |
+| `C-Q` | Quit (asks to save if there are unsaved changes; if saving fails, offers to discard changes and quit) |
 
 ## Configuration
 

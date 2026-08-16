@@ -1,5 +1,8 @@
+use std::io::Read;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -19,9 +22,11 @@ pub enum Mode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfirmKind {
     DeleteFile,
+    DeleteDir,
     Quit,
     DiscardChanges,
     SaveBeforeQuit,
+    DiscardAndQuit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +40,83 @@ pub enum PendingAction {
 pub struct FileEntry {
     pub name: String,
     pub is_dir: bool,
+}
+
+fn terminate_child(child: &mut std::process::Child) {
+    let pid = child.id();
+    let _ = Command::new("kill")
+        .arg("-TERM")
+        .arg(pid.to_string())
+        .status();
+    let kill_deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        if let Ok(Some(_)) = child.try_wait() {
+            return;
+        }
+        if Instant::now() > kill_deadline {
+            let _ = Command::new("kill")
+                .arg("-KILL")
+                .arg(pid.to_string())
+                .status();
+            let _ = child.wait();
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn drain(mut pipe: impl Read, tx: &mpsc::SyncSender<String>) {
+    let mut buf = [0u8; 8192];
+    let mut pending: Vec<u8> = Vec::new();
+    loop {
+        match pipe.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                pending.extend_from_slice(&buf[..n]);
+                let (emit_len, keep) = match std::str::from_utf8(&pending) {
+                    Ok(_) => (pending.len(), 0),
+                    Err(e) => match e.error_len() {
+                        Some(err_len) => (e.valid_up_to() + err_len, 0),
+                        None => (e.valid_up_to(), pending.len() - e.valid_up_to()),
+                    },
+                };
+                if emit_len > 0 {
+                    let s = String::from_utf8_lossy(&pending[..emit_len]).into_owned();
+                    if tx.send(s).is_err() {
+                        return;
+                    }
+                }
+                if keep == 0 {
+                    pending.clear();
+                } else {
+                    pending.drain(..emit_len);
+                }
+            }
+        }
+    }
+    if !pending.is_empty() {
+        let s = String::from_utf8_lossy(&pending).into_owned();
+        let _ = tx.send(s);
+    }
+}
+
+fn append_capped(text: &mut String, truncated: &mut bool, chunk: String) {
+    const CAP: usize = 1 << 20;
+    if text.len() >= CAP {
+        *truncated = true;
+        return;
+    }
+    let budget = CAP - text.len();
+    let mut s = chunk;
+    if s.len() > budget {
+        let mut end = budget;
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        s.truncate(end);
+        *truncated = true;
+    }
+    text.push_str(&s);
 }
 
 #[derive(Debug, Clone)]
@@ -61,7 +143,9 @@ impl App {
         let start_dir = buffer
             .path
             .as_ref()
-            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            .and_then(|p| p.parent())
+            .filter(|d| !d.as_os_str().is_empty())
+            .map(|d| d.to_path_buf())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         let mut app = Self {
             buffer,
@@ -198,7 +282,13 @@ impl App {
             return;
         };
         let path = self.open_dir.join(&entry.name);
-        self.enter_confirm(ConfirmKind::DeleteFile, path);
+        let meta = std::fs::symlink_metadata(&path);
+        let kind = if meta.as_ref().map(|m| m.is_dir()).unwrap_or(false) {
+            ConfirmKind::DeleteDir
+        } else {
+            ConfirmKind::DeleteFile
+        };
+        self.enter_confirm(kind, path);
     }
 
     fn confirm_discard(&mut self, action: PendingAction) {
@@ -209,47 +299,77 @@ impl App {
     }
 
     pub fn run_shell_command(&mut self, cmd: &str) {
-        let output = Command::new("sh").arg("-c").arg(cmd).output();
-        match output {
-            Ok(out) => {
-                const CAP: usize = 1 << 20;
-                let mut text = String::new();
-                let mut append = |bytes: &[u8]| {
-                    if text.len() < CAP {
-                        let s = String::from_utf8_lossy(bytes);
-                        let s = &s[..s
-                            .char_indices()
-                            .take(CAP - text.len())
-                            .last()
-                            .map(|(i, _)| i)
-                            .unwrap_or(0)];
-                        text.push_str(s);
+        let mut child = match Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                self.set_message(format!("Failed to run command: {}", e));
+                return;
+            }
+        };
+        let out_pipe = child.stdout.take();
+        let err_pipe = child.stderr.take();
+        let (tx, rx) = mpsc::sync_channel(4);
+        if let Some(pipe) = out_pipe {
+            let tx = tx.clone();
+            std::thread::spawn(move || drain(pipe, &tx));
+        }
+        if let Some(pipe) = err_pipe {
+            let tx = tx.clone();
+            std::thread::spawn(move || drain(pipe, &tx));
+        }
+        drop(tx);
+        let mut truncated = false;
+        let mut text = String::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(chunk) => append_capped(&mut text, &mut truncated, chunk),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => {
+                    if Instant::now() > deadline {
+                        terminate_child(&mut child);
+                        self.set_message("Command timed out after 5s; killed");
+                        self.mode = Mode::Normal;
+                        return;
                     }
-                };
-                if !out.stdout.is_empty() {
-                    append(&out.stdout);
                 }
-                if !out.stderr.is_empty() {
-                    append(&out.stderr);
-                }
-                if text.is_empty() {
-                    text.push_str(&format!(
-                        "(no output, exit status {})",
-                        out.status.code().unwrap_or(-1)
-                    ));
-                }
-                let truncated = out.stdout.len() + out.stderr.len() > CAP;
-                self.buffer.insert_str(&text);
-                if truncated {
-                    self.set_message(format!(
-                        "Command exited with {} (output truncated)",
-                        out.status
-                    ));
-                } else {
-                    self.set_message(format!("Command exited with {}", out.status));
+                Err(e) => {
+                    self.set_message(format!("Failed to run command: {}", e));
+                    self.mode = Mode::Normal;
+                    return;
                 }
             }
-            Err(e) => self.set_message(format!("Failed to run command: {}", e)),
+        }
+        while let Ok(chunk) = rx.recv_timeout(Duration::from_millis(50)) {
+            append_capped(&mut text, &mut truncated, chunk);
+        }
+        let code = child.wait().map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
+        self.set_shell_result(code, text, truncated);
+    }
+
+    fn set_shell_result(&mut self, code: i32, mut text: String, truncated: bool) {
+        if text.is_empty() {
+            text.push_str(&format!("(no output, exit status {})", code));
+        }
+        self.buffer.insert_str(&text);
+        if truncated {
+            self.set_message(format!(
+                "Command exited with status {} (output truncated)",
+                code
+            ));
+        } else {
+            self.set_message(format!("Command exited with status {}", code));
         }
     }
 
@@ -269,12 +389,19 @@ impl App {
             self.dispatch_action(action);
             return;
         }
+        if !ev.modifiers.is_empty() {
+            return;
+        }
         match ev.code {
             KeyCode::Char(c) => {
                 if c == '\n' {
                     self.buffer.insert_char('\n');
                 } else if let Some(close) = self.auto_pair(c) {
                     self.buffer.insert_pair(c, close);
+                } else if matches!(c, '\'' | '"')
+                    && self.buffer.char_at(self.buffer.cursor) == Some(c)
+                {
+                    self.buffer.move_cursor(self.buffer.cursor + 1);
                 } else {
                     self.buffer.insert_char(c);
                 }
@@ -361,7 +488,9 @@ impl App {
             '(' => Some(')'),
             '[' => Some(']'),
             '{' => Some('}'),
-            '"' | '\'' if self.buffer.should_pair_quote() => Some(c),
+            '"' | '\'' if self.buffer.selection.is_some() || self.buffer.should_pair_quote() => {
+                Some(c)
+            }
             _ => None,
         }
     }
@@ -486,15 +615,17 @@ impl App {
 
     fn handle_goto(&mut self, ev: KeyEvent) {
         match ev.code {
-            KeyCode::Char('t') | KeyCode::Char('T') => {
+            KeyCode::Char('t') | KeyCode::Char('T') if ev.modifiers.is_empty() => {
                 self.buffer.goto_top();
                 self.mode = Mode::Normal;
             }
-            KeyCode::Char('b') | KeyCode::Char('B') => {
+            KeyCode::Char('b') | KeyCode::Char('B') if ev.modifiers.is_empty() => {
                 self.buffer.goto_bottom();
                 self.mode = Mode::Normal;
             }
-            KeyCode::Char(c) if c.is_ascii_digit() => self.prompt_input.push(c),
+            KeyCode::Char(c) if c.is_ascii_digit() && ev.modifiers.is_empty() => {
+                self.prompt_input.push(c)
+            }
             KeyCode::Backspace => {
                 self.prompt_input.pop();
             }
@@ -517,7 +648,12 @@ impl App {
             return;
         }
         match ev.code {
-            KeyCode::Char(c) => self.prompt_input.push(c),
+            KeyCode::Char(c)
+                if !ev.modifiers.contains(KeyModifiers::CONTROL)
+                    && !ev.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                self.prompt_input.push(c)
+            }
             KeyCode::Backspace => {
                 self.prompt_input.pop();
             }
@@ -566,7 +702,12 @@ impl App {
 
     fn handle_shell(&mut self, ev: KeyEvent) {
         match ev.code {
-            KeyCode::Char(c) => self.prompt_input.push(c),
+            KeyCode::Char(c)
+                if !ev.modifiers.contains(KeyModifiers::CONTROL)
+                    && !ev.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                self.prompt_input.push(c)
+            }
             KeyCode::Backspace => {
                 self.prompt_input.pop();
             }
@@ -580,11 +721,22 @@ impl App {
                             if self.pending_action == Some(PendingAction::Quit) {
                                 self.quit_requested = true;
                             }
+                            self.pending_action = None;
+                            self.mode = Mode::Normal;
                         }
-                        Err(e) => self.set_message(format!("Save failed: {}", e)),
+                        Err(e) => {
+                            self.set_message(format!("Save failed: {}", e));
+                            if self.pending_action == Some(PendingAction::Quit) {
+                                self.confirm_kind = Some(ConfirmKind::DiscardAndQuit);
+                                self.confirm_target = None;
+                                self.pending_action = None;
+                                self.mode = Mode::Confirm;
+                            } else {
+                                self.pending_action = None;
+                                self.mode = Mode::Normal;
+                            }
+                        }
                     }
-                    self.pending_action = None;
-                    self.mode = Mode::Normal;
                 } else if self.prompt.starts_with("Rename ") {
                     let Some(target) = self.confirm_target.clone().or_else(|| {
                         self.open_entries
@@ -620,14 +772,21 @@ impl App {
                 match self.confirm_kind {
                     Some(ConfirmKind::DeleteFile) => {
                         if let Some(path) = self.confirm_target.clone() {
-                            let meta = std::fs::metadata(&path);
-                            let result = if meta.as_ref().map(|m| m.is_dir()).unwrap_or(false) {
-                                std::fs::remove_dir_all(&path)
-                            } else {
-                                std::fs::remove_file(&path)
-                            };
+                            let result = std::fs::remove_file(&path);
                             match result {
                                 Ok(()) => self.set_message(format!("Deleted {}", path.display())),
+                                Err(e) => self.set_message(format!("Delete failed: {}", e)),
+                            }
+                        }
+                        self.mode = Mode::Open;
+                        self.refresh_open_dir();
+                    }
+                    Some(ConfirmKind::DeleteDir) => {
+                        if let Some(path) = self.confirm_target.clone() {
+                            let result = std::fs::remove_dir_all(&path);
+                            match result {
+                                Ok(()) => self
+                                    .set_message(format!("Deleted directory {}", path.display())),
                                 Err(e) => self.set_message(format!("Delete failed: {}", e)),
                             }
                         }
@@ -657,7 +816,10 @@ impl App {
                                 Ok(()) => self.quit_requested = true,
                                 Err(e) => {
                                     self.set_message(format!("Save failed: {}", e));
-                                    self.mode = Mode::Normal;
+                                    self.confirm_kind = Some(ConfirmKind::DiscardAndQuit);
+                                    self.confirm_target = None;
+                                    self.pending_action = None;
+                                    self.mode = Mode::Confirm;
                                 }
                             }
                         } else {
@@ -667,11 +829,17 @@ impl App {
                             self.prompt_input.clear();
                         }
                     }
+                    Some(ConfirmKind::DiscardAndQuit) => {
+                        self.quit_requested = true;
+                    }
                     None => self.mode = Mode::Normal,
                 }
-                self.confirm_kind = None;
-                self.confirm_target = None;
-                if self.mode != Mode::Shell {
+                let reentered = self.mode == Mode::Confirm;
+                if !reentered {
+                    self.confirm_kind = None;
+                    self.confirm_target = None;
+                }
+                if self.mode != Mode::Shell && !reentered {
                     self.pending_action = None;
                 }
             }
